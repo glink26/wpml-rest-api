@@ -2,7 +2,7 @@
 
 /*
 Plugin Name: WPML REST API
-Version: 2.0.1
+Version: 2.0.2
 Description: Adds links to posts in other languages into the results of a WP REST API query for sites running the WPML plugin.
 Author: Shawn Hooper
 Author URI: https://profiles.wordpress.org/shooper
@@ -15,7 +15,6 @@ use RuntimeException;
 
 class WPML_REST_API
 {
-
     private array $translations = [];
 
     public function wordpress_hooks(): void
@@ -47,9 +46,6 @@ class WPML_REST_API
         }
 
         // Add WPML fields to all post types
-        // Thanks to Roy Sivan for this trick.
-        // http://www.roysivan.com/wp-api-v2-adding-fields-to-all-post-types/#.VsH0e5MrLcM
-
         $post_types = get_post_types(array('public' => true, 'exclude_from_search' => false));
         foreach ($post_types as $post_type) {
             $this->register_api_field($post_type);
@@ -117,38 +113,45 @@ class WPML_REST_API
      */
     public function get_translations(array $object, string $field_name, WP_REST_Request $request): array
     {
+        // Get the active languages for the site
         $languages = apply_filters('wpml_active_languages', null);
+        $translations = [];
 
         foreach ($languages as $language) {
-            $this->get_translations_for_language($object, $language);
+            // Get the translation for the current post and language
+            $translation = $this->get_translations_for_language($object, $language);
+
+            if ($translation) {
+                $translations[] = $translation;
+            }
         }
 
-        return $this->translations;
+        return $translations;
     }
 
     /**
      * @param array $object
      * @param array $language
-     * @return void
+     * @return array|null
      */
-    private function get_translations_for_language(array $object, array $language) : void {
+    private function get_translations_for_language(array $object, array $language) : ?array
+    {
         $post_id = wpml_object_id_filter($object['id'], 'post', false, $language['language_code']);
+
         if ($post_id === null || $post_id === $object['id']) {
-            $this->translations = [];
-            return;
+            return null; // Skip if no translation is found or it is the same post
         }
 
         $thisPost = get_post($post_id);
 
-        $translation = [
+        // Fetch translation details
+        return [
             'locale' => $language['default_locale'],
             'id' => $thisPost->ID,
             'slug' => $thisPost->post_name,
             'post_title' => $thisPost->post_title,
             'href' => get_permalink($thisPost),
         ];
-
-        $this->translations[$language['default_locale']] = apply_filters('wpmlrestapi_get_translation', $translation, $thisPost, $language);
     }
 }
 

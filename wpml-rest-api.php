@@ -1,11 +1,9 @@
 <?php
-
 /*
-Plugin Name: WPML REST API
-Version: 2.0.2
-Description: Adds links to posts in other languages into the results of a WP REST API query for sites running the WPML plugin.
+Plugin Name: WPML REST API (Enhanced)
+Version: 2.0.3
+Description: Adds translations information to posts, categories, and tags in the WP REST API for sites running WPML.
 Author: Shawn Hooper
-Author URI: https://profiles.wordpress.org/shooper
 */
 
 namespace ShawnHooper\WPML;
@@ -24,7 +22,6 @@ class WPML_REST_API
 
     public function init(): void
     {
-        // Check if WPML is installed
         include_once(ABSPATH . 'wp-admin/includes/plugin.php');
 
         if (!is_plugin_active('sitepress-multilingual-cms/sitepress.php')) {
@@ -32,11 +29,10 @@ class WPML_REST_API
         }
 
         $available_languages = wpml_get_active_languages_filter('', ['skip_missing' => false]);
-
         if ((!empty($available_languages) && !isset($GLOBALS['icl_language_switched'])) || !$GLOBALS['icl_language_switched']) {
             if (isset($_REQUEST['wpml_lang'])) {
                 $lang = $_REQUEST['wpml_lang'];
-            } else if (isset($_REQUEST['lang'])) {
+            } elseif (isset($_REQUEST['lang'])) {
                 $lang = $_REQUEST['lang'];
             }
 
@@ -45,51 +41,43 @@ class WPML_REST_API
             }
         }
 
-        // Add WPML fields to all post types
+        // 为所有 post type 注册字段
         $post_types = get_post_types(array('public' => true, 'exclude_from_search' => false));
         foreach ($post_types as $post_type) {
-            $this->register_api_field($post_type);
+            $this->register_post_type_api_fields($post_type);
+        }
+
+        // 为所有 taxonomy 注册字段 (包括 category 和 post_tag)
+        $taxonomies = get_taxonomies(['public' => true]);
+        foreach ($taxonomies as $taxonomy) {
+            $this->register_taxonomy_api_fields($taxonomy);
         }
     }
 
-    /**
-     * @param string $post_type
-     * @return void
-     */
-    public function register_api_field(string $post_type): void
+    private function register_post_type_api_fields(string $post_type): void
     {
-        register_rest_field($post_type,
-            'wpml_current_locale',
-            array(
-                'get_callback' => [$this, 'get_current_locale'],
-                'update_callback' => null,
-                'schema' => null,
-            )
-        );
+        register_rest_field($post_type, 'wpml_current_locale', [
+            'get_callback' => [$this, 'get_current_locale'],
+            'update_callback' => null,
+            'schema' => null,
+        ]);
 
-        register_rest_field($post_type,
-            'wpml_translations',
-            array(
-                'get_callback' => [$this, 'get_translations'],
-                'update_callback' => null,
-                'schema' => null,
-            )
-        );
+        register_rest_field($post_type, 'wpml_translations', [
+            'get_callback' => [$this, 'get_post_translations'],
+            'update_callback' => null,
+            'schema' => null,
+        ]);
     }
 
-    /**
-     * REST API ENDPOINT Handler
-     *
-     * Retrieve the current locale
-     *
-     * @param array $object Details of current post.
-     * @param string $field_name Name of field.
-     * @param WP_REST_Request $request Current request
-     *
-     * @return string
-     * @throws RuntimeException
-     * @noinspection PhpUnusedParameterInspection
-     */
+    private function register_taxonomy_api_fields(string $taxonomy): void
+    {
+        register_rest_field($taxonomy, 'wpml_translations', [
+            'get_callback' => [$this, 'get_term_translations'],
+            'update_callback' => null,
+            'schema' => null,
+        ]);
+    }
+
     public function get_current_locale(array $object, string $field_name, WP_REST_Request $request): string
     {
         $langInfo = wpml_get_language_information($object);
@@ -99,59 +87,67 @@ class WPML_REST_API
         return $langInfo['locale'];
     }
 
-    /**
-     * REST API ENDPOINT Handler
-     *
-     * Retrieve available translations
-     *
-     * @param array $object Details of current post.
-     * @param string $field_name Name of field.
-     * @param WP_REST_Request $request Current request
-     *
-     * @return array
-     * @noinspection PhpUnusedParameterInspection
-     */
-    public function get_translations(array $object, string $field_name, WP_REST_Request $request): array
+    public function get_post_translations(array $object, string $field_name, WP_REST_Request $request): array
     {
-        // Get the active languages for the site
+        $this->translations = [];
         $languages = apply_filters('wpml_active_languages', null);
-        $translations = [];
+
+        if (!$languages) {
+            return [];
+        }
 
         foreach ($languages as $language) {
-            // Get the translation for the current post and language
-            $translation = $this->get_translations_for_language($object, $language);
+            $this->add_post_translation($object, $language);
+        }
 
-            if ($translation) {
-                $translations[] = $translation;
+        return $this->translations;
+    }
+
+    private function add_post_translation(array $object, array $language): void
+    {
+        $post_id = wpml_object_id_filter($object['id'], $object['type'], false, $language['language_code']);
+        if (!$post_id || $post_id === $object['id']) {
+            return;
+        }
+
+        $translated_post = get_post($post_id);
+        if ($translated_post) {
+            $this->translations[$language['default_locale']] = [
+                'locale'     => $language['default_locale'],
+                'id'         => $translated_post->ID,
+                'slug'       => $translated_post->post_name,
+                'post_title' => $translated_post->post_title,
+                'href'       => get_permalink($translated_post),
+            ];
+        }
+    }
+
+    public function get_term_translations(array $object, string $field_name, WP_REST_Request $request): array
+    {
+        $translations = [];
+        $languages = apply_filters('wpml_active_languages', null);
+
+        if (!$languages || empty($object['id']) || empty($object['taxonomy'])) {
+            return [];
+        }
+
+        foreach ($languages as $language) {
+            $term_id = apply_filters('wpml_object_id', $object['id'], $object['taxonomy'], false, $language['language_code']);
+            if ($term_id && $term_id !== $object['id']) {
+                $term = get_term($term_id, $object['taxonomy']);
+                if ($term && !is_wp_error($term)) {
+                    $translations[$language['default_locale']] = [
+                        'locale' => $language['default_locale'],
+                        'id'     => $term->term_id,
+                        'slug'   => $term->slug,
+                        'name'   => $term->name,
+                        'href'   => get_term_link($term),
+                    ];
+                }
             }
         }
 
         return $translations;
-    }
-
-    /**
-     * @param array $object
-     * @param array $language
-     * @return array|null
-     */
-    private function get_translations_for_language(array $object, array $language) : ?array
-    {
-        $post_id = wpml_object_id_filter($object['id'], 'post', false, $language['language_code']);
-
-        if ($post_id === null || $post_id === $object['id']) {
-            return null; // Skip if no translation is found or it is the same post
-        }
-
-        $thisPost = get_post($post_id);
-
-        // Fetch translation details
-        return [
-            'locale' => $language['default_locale'],
-            'id' => $thisPost->ID,
-            'slug' => $thisPost->post_name,
-            'post_title' => $thisPost->post_title,
-            'href' => get_permalink($thisPost),
-        ];
     }
 }
 
